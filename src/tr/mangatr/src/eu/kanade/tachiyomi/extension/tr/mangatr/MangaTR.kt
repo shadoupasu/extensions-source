@@ -13,8 +13,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.toJsonRequestBody
-import kotlinx.serialization.Serializable
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -148,7 +146,7 @@ abstract class MangaTR : HttpSource() {
                 }
             }
 
-        return MangasPage(mangas, false) 
+        return MangasPage(mangas, false)
     }
 
     // ============================== Details ==============================
@@ -349,37 +347,6 @@ abstract class MangaTR : HttpSource() {
 
     // ============================= Utilities =============================
 
-    private fun verifyChallengeInterceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val response = chain.proceed(request)
-
-        if (response.code == 200 && response.header("Content-Type")?.contains("text/html") == true) {
-            val responseBody = response.peekBody(2048)
-            val bodyString = responseBody.string()
-
-            if (bodyString.contains("challenge: \"") && bodyString.contains("/cek/verify.php")) {
-                val challengeMatch = CHALLENGE_REGEX.find(bodyString)
-                if (challengeMatch != null) {
-                    val challenge = challengeMatch.groupValues[1]
-                    val verifyUrl = request.url.newBuilder().encodedPath("/cek/verify.php").build()
-                    val verifyRequest = request.newBuilder()
-                        .url(verifyUrl)
-                        .post(ChallengeRequestDto(challenge).toJsonRequestBody())
-                        .header("Accept", "application/json")
-                        .header("Referer", request.url.toString())
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .build()
-
-                    network.client.newCall(verifyRequest).execute().close()
-
-                    response.close()
-                    return chain.proceed(request)
-                }
-            }
-        }
-        return response
-    }
-
     private fun coverInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         if (request.url.pathSegments.firstOrNull() == "fake-cover") {
@@ -473,14 +440,10 @@ abstract class MangaTR : HttpSource() {
         return cal.timeInMillis
     }
 
-    @Serializable
-    private class ChallengeRequestDto(val challenge: String)
-
     companion object {
         private val YEAR_REGEX = Regex("""\s*\(\d{4}\)$""")
         private val NUMBER_REGEX = Regex("""\d+""")
         private val IMG_URL_REGEX = Regex("""https?://[^"'\s]*img_part\.php[^"'\s]*""")
         private val KEY_REGEX = Regex("""key=([^&]+)""")
-        private val CHALLENGE_REGEX = Regex("""challenge:\s*"([^"]+)"""")
     }
 }
