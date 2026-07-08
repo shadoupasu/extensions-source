@@ -31,10 +31,13 @@ import java.util.Locale
 @Source
 abstract class MangaTR : HttpSource() {
 
+    // Cookie ve yönlendirme sorunlarını aşmak için www eklendi
+    override val baseUrl = "https://www.manga-tr.com"
+
     override val supportsLatest = true
 
     override fun headersBuilder() = super.headersBuilder()
-        .add("Accept-Language", "en-US,en;q=0.5")
+        .add("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
 
     override val client = network.client.newBuilder()
         .addInterceptor(::mangaShieldInterceptor)
@@ -44,7 +47,6 @@ abstract class MangaTR : HttpSource() {
 
     private var captchaUrl: String? = null
 
-    // Manga Shield ve Turnstile 403 Koruması
     private fun mangaShieldInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val response = chain.proceed(request)
@@ -53,7 +55,8 @@ abstract class MangaTR : HttpSource() {
         if (response.code == 403 || response.code == 503 ||
             bodyText.contains("Manga Shield", ignoreCase = true) ||
             bodyText.contains("Güvenlik Kontrolü", ignoreCase = true) ||
-            bodyText.contains("cf-turnstile")
+            bodyText.contains("cf-turnstile") ||
+            bodyText.contains("Just a moment...")
         ) {
             response.close()
             throw IOException("Lütfen WebView üzerinden 'Manga Shield' bot korumasını geçin.")
@@ -65,7 +68,7 @@ abstract class MangaTR : HttpSource() {
     // ============================== Popular ==============================
 
     override fun popularMangaRequest(page: Int): Request {
-        if (page > 1) return GET("$baseUrl/sayfa-yok.html", headers)
+        if (page > 1) return GET("$baseUrl/sayfa-yok.html", headers) // Tüm liste JSON ile tek seferde çekilir
         return GET("$baseUrl/manga-list.html", headers)
     }
 
@@ -94,46 +97,65 @@ abstract class MangaTR : HttpSource() {
 
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val path = response.request.url.encodedPath
+        val url = response.request.url.toString()
+        val mangas = mutableListOf<SManga>()
 
-        // Arama kısmı (Çalıştığı için dokunulmadı)
-        if (path.contains("/arama.html")) {
-            val mangas = document.select("div.arama-manga-list a.arama-manga-item")
-                .filterNot {
-                    val badges = it.select("span.la-badge").text().lowercase(Locale.ROOT)
-                    badges.contains("novel") || badges.contains("anime")
-                }
-                .mapNotNull {
-                    val mangaTitle = it.selectFirst(".arama-manga-name")?.text() ?: it.text()
-                    if (mangaTitle.isEmpty()) return@mapNotNull null
+        // 1. Arama Ekranı
+        if (url.contains("arama.html") || url.contains("icerik=")) {
+            document.select("div.arama-manga-list a.arama-manga-item").forEach { element ->
+                val badges = element.select("span.la-badge").text().lowercase(Locale.ROOT)
+                if (badges.contains("novel") || badges.contains("anime")) return@forEach
+                
+                val mangaTitle = element.selectFirst(".arama-manga-name")?.text() ?: element.text()
+                if (mangaTitle.isEmpty()) return@forEach
 
-                    SManga.create().apply {
-                        setUrlWithoutDomain(it.absUrl("href"))
-                        title = mangaTitle
-                        val slug = it.attr("manga-slug")
-                        if (slug.isNotBlank()) {
-                            thumbnail_url = "$baseUrl/fake-cover/$slug"
-                        }
-                    }
-                }
+                val slug = element.attr("manga-slug")
+                mangas.add(SManga.create().apply {
+                    setUrlWithoutDomain(element.absUrl("href"))
+                    title = mangaTitle
+                    if (slug.isNotBlank()) thumbnail_url = "$baseUrl/fake-cover/$slug"
+                })
+            }
             return MangasPage(mangas, false)
         }
 
-        // CSS Sınıflarından Bağımsız, Zırh Delici Liste Taraması (Manga Linklerini Yakalar)
-        val mangas = document.select("a[href^=manga-]:not([href*=manga-list])")
-            .filter { it.text().isNotBlank() }
-            .distinctBy { it.attr("href") }
-            .mapNotNull {
-                val href = it.attr("href")
-                if (!href.endsWith(".html")) return@mapNotNull null
-
-                SManga.create().apply {
-                    setUrlWithoutDomain(if (href.startsWith("/")) href else "/$href")
-                    title = it.text().trim()
-                    val slug = href.substringAfter("manga-").substringBefore(".html")
-                    thumbnail_url = "$baseUrl/fake-cover/$slug"
+        // 2. Katalog Ekranı
+        // A) Ekranda Görünenler
+        document.select("a.la-manga-item").forEach { element ->
+            val badges = element.select("span.la-manga-badges").text().lowercase(Locale.ROOT)
+            if (badges.contains("novel") || badges.contains("anime")) return@forEach
+            
+            val mangaTitle = element.selectFirst("span.la-manga-name")?.text() ?: return@forEach
+            val slug = element.attr("manga-slug")
+            
+            mangas.add(SManga.create().apply {
+                setUrlWithoutDomain(element.absUrl("href"))
+                title = mangaTitle
+                if (slug.isNotBlank()) thumbnail_url = "$baseUrl/fake-cover/$slug"
+            })
+        }
+        
+        // B) Sayfa Arkasına Gizlenmiş JSON Verisini Çekme (10.000+ Seri)
+        document.select("div.la-manga-list-hidden").forEach { hiddenDiv ->
+            val jsonStr = hiddenDiv.attr("data-hidden-items")
+            
+            val pattern = """\{"name":"(.*?)","slug":"([^"]+)"""".toRegex()
+            pattern.findAll(jsonStr).forEach { matchResult ->
+                val titleRaw = matchResult.groupValues[1]
+                    .replace("\\\"", "\"").replace("\\\\", "\\")
+                    .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
+                val slugRaw = matchResult.groupValues[2]
+                
+                val mangaUrl = "/manga-$slugRaw.html"
+                if (mangas.none { it.url == mangaUrl }) {
+                    mangas.add(SManga.create().apply {
+                        setUrlWithoutDomain(mangaUrl)
+                        title = titleRaw
+                        thumbnail_url = "$baseUrl/fake-cover/$slugRaw"
+                    })
                 }
             }
+        }
 
         return MangasPage(mangas, false)
     }
@@ -145,7 +167,7 @@ abstract class MangaTR : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
         val document = response.asJsoup()
 
-        title = document.selectFirst("h1")?.text()?.replace(YEAR_REGEX, "") ?: throw Exception("Manga başlığı okunamadı (WebView kontrol edin)")
+        title = document.selectFirst("h1")?.text()?.replace(YEAR_REGEX, "") ?: throw Exception("Seri başlığı bulunamadı (WebView'i kontrol edin)")
         thumbnail_url = document.selectFirst(".poster-card__image")?.absUrl("src")
 
         val descBlock = document.selectFirst("#manga-description, .detail-copy")?.text()
@@ -159,12 +181,9 @@ abstract class MangaTR : HttpSource() {
             }
         }
 
-        author = document.select(".detail-meta-row:contains(Yazar) .detail-meta-row__value a")
-            .joinToString { it.text() }
-        artist = document.select(".detail-meta-row:contains(Sanatçı) .detail-meta-row__value a")
-            .joinToString { it.text() }
-        genre = document.select(".detail-meta-row:contains(Tür) .detail-meta-row__value a")
-            .joinToString { it.text() }
+        author = document.select(".detail-meta-row:contains(Yazar) .detail-meta-row__value a").joinToString { it.text() }
+        artist = document.select(".detail-meta-row:contains(Sanatçı) .detail-meta-row__value a").joinToString { it.text() }
+        genre = document.select(".detail-meta-row:contains(Tür) .detail-meta-row__value a").joinToString { it.text() }
 
         val statusText = document.selectFirst(".detail-meta-row:contains(Yayın durumu) .detail-meta-row__value")?.text()?.lowercase(Locale.ROOT)
         status = when {
@@ -180,19 +199,16 @@ abstract class MangaTR : HttpSource() {
 
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
         val chapters = mutableListOf<SChapter>()
-
-        // 1. Şans: CSS'ten bağımsız olarak ana sayfadaki -read- içeren bölüm linklerini topla
+        
         val doc = client.newCall(GET(baseUrl + manga.url, headers)).execute().asJsoup()
-        val mainPageLinks = doc.select("a[href*=-read-]")
-            .filterNot { it.hasClass("primary-button") || it.text().contains("İlk Bölüm", true) || it.text().contains("Son Bölüm", true) }
-
-        mainPageLinks.forEach { a ->
-            chapters.add(parseChapterFromLink(a))
+        
+        // 1. Yeni Tasarım (Bento Card) ve Eski Tasarım (Chapter Card) Taraması
+        doc.select("article.bento-ep-card, article.chapter-card").forEach { element ->
+            chapters.add(parseChapterElement(element))
         }
 
-        // 2. Şans: AJAX üzerinden sayfalamayı çek (403 Yememek İçin Gizli Kimlikler Eklendi)
-        val id = manga.url.substringAfter("manga-").substringBefore(".html")
-        var nextPage = 1
+        // 2. Şifreli Jeton ile AJAX Üzerinden Sonraki Sayfaları Çekme (POST İsteği)
+        var nextKey = getNextPageKey(doc)
         
         val ajaxHeaders = headersBuilder()
             .add("X-Requested-With", "XMLHttpRequest")
@@ -200,49 +216,54 @@ abstract class MangaTR : HttpSource() {
             .add("Accept", "text/html, */*; q=0.01")
             .build()
 
-        while (true) {
-            val requestUrl = "$baseUrl/cek/fetch_pages_manga.php?manga_cek=$id&page=$nextPage"
-            val response = client.newCall(GET(requestUrl, ajaxHeaders)).execute()
+        while (nextKey != null) {
+            val requestUrl = "$baseUrl/cek/fetch_pages_manga.php"
+            val postBody = FormBody.Builder()
+                .add("chapter_list_key", nextKey)
+                .build()
+                
+            val response = client.newCall(POST(requestUrl, ajaxHeaders, postBody)).execute()
             val ajaxDoc = response.asJsoup()
             ajaxDoc.setBaseUri(baseUrl)
 
-            val ajaxLinks = ajaxDoc.select("a[href*=-read-]")
-                .filterNot { it.hasClass("primary-button") || it.text().contains("İlk Bölüm", true) || it.text().contains("Son Bölüm", true) }
-
-            if (ajaxLinks.isEmpty()) break
-
-            ajaxLinks.forEach { a ->
-                val chapter = parseChapterFromLink(a)
+            ajaxDoc.select("article.bento-ep-card, article.chapter-card").forEach { element ->
+                val chapter = parseChapterElement(element)
                 if (chapters.none { it.url == chapter.url }) {
                     chapters.add(chapter)
                 }
             }
-
-            val hasNext = ajaxDoc.selectFirst("nav.pagination-wrap a.pagination-link[data-page=${nextPage + 1}]") != null
-            if (!hasNext) break
-            nextPage++
+            
+            nextKey = getNextPageKey(ajaxDoc)
         }
         
         chapters
     }
 
-    private fun parseChapterFromLink(element: Element): SChapter {
+    private fun getNextPageKey(document: org.jsoup.nodes.Document): String? {
+        val activePage = document.selectFirst("nav.pagination-wrap a.pagination-link.is-active") ?: return null
+        val nextNum = (activePage.text().toIntOrNull() ?: 1) + 1
+        val nextLink = document.selectFirst("nav.pagination-wrap a.pagination-link[data-page=$nextNum]")
+        return nextLink?.attr("data-key")?.takeIf { it.isNotBlank() }
+    }
+
+    private fun parseChapterElement(element: Element): SChapter {
         return SChapter.create().apply {
-            val href = element.attr("href")
+            val link = element.selectFirst("a.bento-ep-title-link") ?: element.selectFirst("a[href*=-read-], a.chapter-card__row, a.chapter-card__title")!!
+            val href = link.attr("href")
             setUrlWithoutDomain(if (href.startsWith("/")) href else "/$href")
 
-            var text = element.text().trim()
-            val specificTitle = element.select(".chapter-number, .chapter-title").text()
-            if (specificTitle.isNotBlank()) {
-                text = specificTitle
+            val numText = element.selectFirst(".bento-ep-chapter-num, .chapter-number")?.text()?.trim()?.removeSuffix(".")
+            val labelText = element.selectFirst(".bento-ep-chapter-label")?.text()?.trim()
+            val specificTitle = element.selectFirst(".chapter-title span")?.text()?.trim()
+
+            name = when {
+                numText != null && labelText != null -> "$labelText $numText".trim()
+                numText != null -> "Bölüm $numText"
+                specificTitle != null -> specificTitle
+                else -> link.text().trim()
             }
 
-            name = if (text.isNotBlank()) text else {
-                val chapNum = href.substringAfter("-chapter-", "").substringBefore(".html")
-                if (chapNum.isNotBlank()) "Bölüm $chapNum" else "Bölüm"
-            }
-
-            val dateText = element.parent()?.select(".chapter-card__meta span, .date, time")?.text()
+            val dateText = element.selectFirst(".bento-ep-meta-time, .chapter-card__meta span")?.text()
             date_upload = parseRelativeDate(dateText)
         }
     }
