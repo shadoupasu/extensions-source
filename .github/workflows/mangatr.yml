@@ -17,6 +17,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Otomatik Kod Formatlayici (Spotless Fix)
+        run: ./gradlew :src:tr:mangatr:spotlessApply
+
       - name: Build MangaTR APK
         run: ./gradlew :src:tr:mangatr:assembleDebug
 
