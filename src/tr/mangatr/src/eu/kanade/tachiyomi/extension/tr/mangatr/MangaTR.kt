@@ -21,6 +21,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import org.jsoup.nodes.Element
 import rx.Observable
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -36,21 +37,46 @@ abstract class MangaTR : HttpSource() {
         .add("Accept-Language", "en-US,en;q=0.5")
 
     override val client = network.client.newBuilder()
+        .addInterceptor(::mangaShieldInterceptor)
         .addInterceptor(::coverInterceptor)
         .rateLimit(2)
         .build()
 
     private var captchaUrl: String? = null
 
+    // Yeni: Tüm siteyi denetleyen Manga Shield Koruması
+    private fun mangaShieldInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+
+        val bodyText = response.peekBody(4096).string()
+        if (bodyText.contains("Manga Shield", ignoreCase = true) ||
+            bodyText.contains("Güvenlik Kontrolü", ignoreCase = true) ||
+            bodyText.contains("Tarayıcınız doğrulanıyor", ignoreCase = true) ||
+            bodyText.contains("cf-turnstile")
+        ) {
+            response.close()
+            throw IOException("Lütfen WebView üzerinden 'Manga Shield' korumasını geçin.")
+        }
+
+        return response
+    }
+
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manga-list.html?sort=views&sort_type=DESC&page=$page&listType=pagination", headers)
+    override fun popularMangaRequest(page: Int): Request {
+        if (page > 1) return GET("$baseUrl/sayfa-yok.html", headers)
+        return GET("$baseUrl/manga-list.html", headers)
+    }
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
 
     // ============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/manga-list.html?sort=last_update&sort_type=DESC&page=$page&listType=pagination", headers)
+    override fun latestUpdatesRequest(page: Int): Request {
+        if (page > 1) return GET("$baseUrl/sayfa-yok.html", headers)
+        return GET("$baseUrl/manga-list.html", headers)
+    }
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
 
@@ -63,47 +89,13 @@ abstract class MangaTR : HttpSource() {
                 .build()
             return GET(url, headers)
         }
-
-        val url = "$baseUrl/manga-list.html".toHttpUrl().newBuilder()
-            .addQueryParameter("page", page.toString())
-            .addQueryParameter("listType", "pagination")
-
-        filters.forEach { filter ->
-            when (filter) {
-                is SortFilter -> url.addQueryParameter("sort", filter.toUriPart())
-                is SortDirectionFilter -> url.addQueryParameter("sort_type", filter.toUriPart())
-                is GenreFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) url.addQueryParameter("tur", value)
-                }
-                is StatusFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) url.addQueryParameter("durum", value)
-                }
-                is TranslationStatusFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) url.addQueryParameter("ceviri", value)
-                }
-                is AgeFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) url.addQueryParameter("yas", value)
-                }
-                is ContentTypeFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) url.addQueryParameter("icerik", value)
-                }
-                else -> {}
-            }
-        }
-
-        return GET(url.build(), headers)
+        return GET("$baseUrl/manga-list.html", headers)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
         val path = response.request.url.encodedPath
 
-        // ARAMA KISMI (Çalışan kısım)
         if (path.contains("/arama.html")) {
             val mangas = document.select("div.arama-manga-list a.arama-manga-item")
                 .filterNot {
@@ -126,7 +118,6 @@ abstract class MangaTR : HttpSource() {
             return MangasPage(mangas, false)
         }
 
-        // YENİ KATALOG KISMI (la-manga-item)
         val mangas = document.select("div.la-manga-list a.la-manga-item")
             .filterNot {
                 val badges = it.select("span.la-manga-badges").text().lowercase(Locale.ROOT)
@@ -155,7 +146,7 @@ abstract class MangaTR : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
         val document = response.asJsoup()
 
-        title = document.selectFirst("h1")?.text()?.replace(YEAR_REGEX, "") ?: throw Exception("Manga title not found")
+        title = document.selectFirst("h1")?.text()?.replace(YEAR_REGEX, "") ?: throw Exception("Seri başlığı bulunamadı (WebView'ı kontrol edin)")
         thumbnail_url = document.selectFirst(".poster-card__image")?.absUrl("src")
 
         val descBlock = document.selectFirst("#manga-description, .detail-copy")?.text()
@@ -190,55 +181,59 @@ abstract class MangaTR : HttpSource() {
 
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
         val chapters = mutableListOf<SChapter>()
-        val id = manga.url.substringAfter("manga-").substringBefore(".html")
-        var nextPage = 1
+        
+        val doc = client.newCall(GET(baseUrl + manga.url, headers)).execute().asJsoup()
+        val mainPageElements = doc.select("article.chapter-card")
 
-        val chapterHeaders = headersBuilder()
-            .add("X-Requested-With", "XMLHttpRequest")
-            .add("Referer", baseUrl + manga.url)
-            .build()
+        if (mainPageElements.isNotEmpty()) {
+            mainPageElements.forEach { element ->
+                chapters.add(parseChapterElement(element))
+            }
+        } else {
+            val id = manga.url.substringAfter("manga-").substringBefore(".html")
+            var nextPage = 1
+            while (true) {
+                val requestUrl = "$baseUrl/cek/fetch_pages_manga.php?manga_cek=$id&page=$nextPage"
+                val response = client.newCall(GET(requestUrl, headers)).execute()
+                val ajaxDoc = response.asJsoup()
+                ajaxDoc.setBaseUri(baseUrl)
 
-        while (true) {
-            val requestUrl = "$baseUrl/cek/fetch_pages_manga.php?manga_cek=$id&page=$nextPage"
-            val response = client.newCall(GET(requestUrl, chapterHeaders)).execute()
-            val doc = response.asJsoup()
+                val ajaxElements = ajaxDoc.select("article.chapter-card")
+                if (ajaxElements.isEmpty()) break
 
-            doc.setBaseUri(baseUrl)
-
-            val elements = doc.select("article.chapter-card")
-            if (elements.isEmpty()) break
-
-            chapters.addAll(
-                elements.map { element ->
-                    SChapter.create().apply {
-                        val row = element.selectFirst("a.chapter-card__row") ?: element.selectFirst("a.chapter-card__title")!!
-                        val href = row.attr("href")
-                        setUrlWithoutDomain(if (href.startsWith("/")) href else "/$href")
-
-                        val chapterNumText = row.selectFirst(".chapter-number")?.text()?.removeSuffix(".")
-                            ?: row.selectFirst(".chapter-title span")?.text()
-                            ?: "Bölüm"
-
-                        val sub = element.selectFirst("p.chapter-card__subtitle")?.text()
-
-                        name = if (!sub.isNullOrEmpty()) {
-                            "Bölüm $chapterNumText - $sub"
-                        } else {
-                            "Bölüm $chapterNumText"
-                        }
-
-                        val dateText = element.selectFirst(".chapter-card__meta span")?.text()
-                        date_upload = parseRelativeDate(dateText)
-                    }
+                ajaxElements.forEach { element ->
+                    chapters.add(parseChapterElement(element))
                 }
-            )
 
-            val hasNext = doc.selectFirst("nav.pagination-wrap a.pagination-link[data-page=${nextPage + 1}]") != null
-            if (!hasNext) break
-            nextPage++
+                val hasNext = ajaxDoc.selectFirst("nav.pagination-wrap a.pagination-link[data-page=${nextPage + 1}]") != null
+                if (!hasNext) break
+                nextPage++
+            }
         }
-
         chapters
+    }
+
+    private fun parseChapterElement(element: Element): SChapter {
+        return SChapter.create().apply {
+            val row = element.selectFirst("a.chapter-card__row") ?: element.selectFirst("a.chapter-card__title")!!
+            val href = row.attr("href")
+            setUrlWithoutDomain(if (href.startsWith("/")) href else "/$href")
+
+            val chapterNumText = row.selectFirst(".chapter-number")?.text()?.removeSuffix(".")
+                ?: row.selectFirst(".chapter-title span")?.text()
+                ?: "Bölüm"
+
+            val sub = element.selectFirst("p.chapter-card__subtitle")?.text()
+
+            name = if (!sub.isNullOrEmpty()) {
+                "Bölüm $chapterNumText - $sub"
+            } else {
+                "Bölüm $chapterNumText"
+            }
+
+            val dateText = element.selectFirst(".chapter-card__meta span")?.text()
+            date_upload = parseRelativeDate(dateText)
+        }
     }
 
     override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException("Not used.")
@@ -248,15 +243,8 @@ abstract class MangaTR : HttpSource() {
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
 
-        // Check if chapter requires login
         if (document.selectFirst("div#uyari:contains(üye girişi)") != null) {
             throw IOException("Bu bölümü okuyabilmek için WebView üzerinden üye girişi yapmanız gerekmektedir.")
-        }
-
-        // Workaround for unsolved DDOS-Guard/Captcha
-        if (document.selectFirst("canvas#sliderCanvas, div.box h2:contains(Güvenlik Doğrulaması), div.cf-turnstile") != null) {
-            captchaUrl = response.request.url.toString()
-            throw IOException("Lütfen WebView'da Bot Korumasını geçin.")
         }
 
         val pages = mutableListOf<Page>()
@@ -359,7 +347,7 @@ abstract class MangaTR : HttpSource() {
             val popRequest = POST(
                 "$baseUrl/app/manga/controllers/cont.pop.php",
                 popHeaders,
-                FormBody.Builder().add("slug", slug).build(),
+                FormBody.Builder().add("slug", slug).build()
             )
 
             val realCoverUrl = try {
@@ -388,7 +376,6 @@ abstract class MangaTR : HttpSource() {
         return chain.proceed(request)
     }
 
-    /** Decodes `data-order`: Base64 then XOR 0x5A, returning a list of (partIndex → position) pairs. */
     private fun decodePartOrderMapping(encoded: String): List<Pair<Int, Int>>? {
         val raw = try {
             Base64.decode(encoded, Base64.DEFAULT)
