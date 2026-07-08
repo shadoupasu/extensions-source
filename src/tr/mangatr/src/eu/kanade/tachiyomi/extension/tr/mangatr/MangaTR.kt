@@ -224,7 +224,7 @@ abstract class MangaTR : HttpSource() {
                     SChapter.create().apply {
                         val row = element.selectFirst("a.chapter-card__row") ?: element.selectFirst("a.chapter-card__title")!!
                         val href = row.attr("href")
-                        url = if (href.startsWith("/")) href else "/$href"
+                        setUrlWithoutDomain(if (href.startsWith("/")) href else "/$href")
 
                         val chapterNumText = row.selectFirst(".chapter-number")?.text()?.removeSuffix(".")
                             ?: row.selectFirst(".chapter-title span")?.text()
