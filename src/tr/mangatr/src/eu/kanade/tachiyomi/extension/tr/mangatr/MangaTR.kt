@@ -39,9 +39,7 @@ abstract class MangaTR : HttpSource() {
         .add("Accept-Language", "en-US,en;q=0.5")
 
     override val client = network.client.newBuilder()
-        .addInterceptor(::verifyChallengeInterceptor)
         .addInterceptor(::coverInterceptor)
-        .addInterceptor(DDoSGuardInterceptor(network.client))
         .rateLimit(2)
         .build()
 
@@ -108,6 +106,7 @@ abstract class MangaTR : HttpSource() {
         val document = response.asJsoup()
         val path = response.request.url.encodedPath
 
+        // ARAMA KISMI (Çalışan kısım)
         if (path.contains("/arama.html")) {
             val mangas = document.select("div.arama-manga-list a.arama-manga-item")
                 .filterNot {
@@ -121,9 +120,6 @@ abstract class MangaTR : HttpSource() {
                     SManga.create().apply {
                         setUrlWithoutDomain(it.absUrl("href"))
                         title = mangaTitle
-
-                        // Fake URL for interceptor to catch and fetch dynamically
-                        // so it doesn't block the UI while parsing search entries
                         val slug = it.attr("manga-slug")
                         if (slug.isNotBlank()) {
                             thumbnail_url = "$baseUrl/fake-cover/$slug"
@@ -133,30 +129,26 @@ abstract class MangaTR : HttpSource() {
             return MangasPage(mangas, false)
         }
 
-        val mangas = document.select("div.media-card")
+        // YENİ KATALOG KISMI (la-manga-item)
+        val mangas = document.select("div.la-manga-list a.la-manga-item")
             .filterNot {
-                val badge = it.selectFirst(".media-card__badge")?.text()?.lowercase(Locale.ROOT).orEmpty()
-                badge.contains("novel") || badge.contains("anime")
+                val badges = it.select("span.la-manga-badges").text().lowercase(Locale.ROOT)
+                badges.contains("novel") || badges.contains("anime")
             }
             .mapNotNull {
-                val titleLink = it.selectFirst("a.media-card__title, a.media-card__cover-link") ?: return@mapNotNull null
-                val mangaTitle = it.selectFirst("a.media-card__title")?.text() ?: return@mapNotNull null
+                val mangaTitle = it.selectFirst("span.la-manga-name")?.text() ?: return@mapNotNull null
 
                 SManga.create().apply {
-                    setUrlWithoutDomain(titleLink.absUrl("href"))
+                    setUrlWithoutDomain(it.absUrl("href"))
                     title = mangaTitle
-                    thumbnail_url = it.selectFirst("img.media-card__cover")?.absUrl("src")
+                    val slug = it.attr("manga-slug")
+                    if (slug.isNotBlank()) {
+                        thumbnail_url = "$baseUrl/fake-cover/$slug"
+                    }
                 }
             }
 
-        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val hasNextPage = document.select(".pagination-wrap a.pagination-link").any {
-            val href = it.absUrl("href")
-            val pageNum = href.toHttpUrlOrNull()?.queryParameter("page")?.toIntOrNull()
-            pageNum != null && pageNum > currentPage
-        }
-
-        return MangasPage(mangas, hasNextPage)
+        return MangasPage(mangas, false) 
     }
 
     // ============================== Details ==============================
