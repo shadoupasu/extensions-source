@@ -49,13 +49,13 @@ abstract class MangaTR : HttpSource() {
 
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manga-list-sayfala.html?sort=views&sort_type=DESC&page=$page&listType=pagination", headers)
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manga-list.html?sort=views&sort_type=DESC&page=$page&listType=pagination", headers)
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
 
     // ============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/manga-list-sayfala.html?sort=last_update&sort_type=DESC&page=$page&listType=pagination", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/manga-list.html?sort=last_update&sort_type=DESC&page=$page&listType=pagination", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
 
@@ -69,7 +69,7 @@ abstract class MangaTR : HttpSource() {
             return GET(url, headers)
         }
 
-        val url = "$baseUrl/manga-list-sayfala.html".toHttpUrl().newBuilder()
+        val url = "$baseUrl/manga-list.html".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("listType", "pagination")
 
