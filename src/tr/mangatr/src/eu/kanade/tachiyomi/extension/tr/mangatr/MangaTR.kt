@@ -15,7 +15,6 @@ import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
@@ -231,7 +230,7 @@ abstract class MangaTR : HttpSource() {
                         val dateText = element.selectFirst(".chapter-card__meta span")?.text()
                         date_upload = parseRelativeDate(dateText)
                     }
-                },
+                }
             )
 
             val hasNext = doc.selectFirst("nav.pagination-wrap a.pagination-link[data-page=${nextPage + 1}]") != null
@@ -342,7 +341,7 @@ abstract class MangaTR : HttpSource() {
         StatusFilter(),
         TranslationStatusFilter(),
         AgeFilter(),
-        ContentTypeFilter(),
+        ContentTypeFilter()
     )
 
     // ============================= Utilities =============================
